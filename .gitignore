@@ -18,3 +18,9 @@ cscope.out
 /bin
 /build
 /lib
+
+mirb
+mrbc
+mruby
+mruby-strip
+Android.mk
