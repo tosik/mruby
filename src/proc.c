@@ -7,7 +7,7 @@
 #include "mruby.h"
 #include "mruby/class.h"
 #include "mruby/proc.h"
-#include "opcode.h"
+#include "mruby/opcode.h"
 
 static mrb_code call_iseq[] = {
   MKOP_A(OP_CALL, 0),
@@ -43,7 +43,7 @@ closure_setup(mrb_state *mrb, struct RProc *p, int nlocals)
     e = (struct REnv*)mrb_obj_alloc(mrb, MRB_TT_ENV, (struct RClass*)mrb->c->ci->proc->env);
     MRB_ENV_STACK_LEN(e)= (unsigned int)nlocals;
     e->mid = mrb->c->ci->mid;
-     e->cioff = mrb->c->ci - mrb->c->cibase;
+    e->cioff = mrb->c->ci - mrb->c->cibase;
     e->stack = mrb->c->stack;
     mrb->c->ci->env = e;
   }
@@ -91,7 +91,7 @@ mrb_proc_copy(struct RProc *a, struct RProc *b)
   a->body = b->body;
   if (!MRB_PROC_CFUNC_P(a)) {
     a->body.irep->refcnt++;
-  };
+  }
   a->target_class = b->target_class;
   a->env = b->env;
 }

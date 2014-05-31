@@ -3417,15 +3417,15 @@ skip(parser_state *p, char term)
   }
 }
 
-static mrb_bool
-peek_n(parser_state *p, int c, int n)
+static int
+peekc_n(parser_state *p, int n)
 {
   node *list = 0;
   int c0;
 
   do {
     c0 = nextc(p);
-    if (c0 < 0) return FALSE;
+    if (c0 < 0) return c0;
     list = push(list, (node*)(intptr_t)c0);
   } while(n--);
   if (p->pb) {
@@ -3434,8 +3434,13 @@ peek_n(parser_state *p, int c, int n)
   else {
     p->pb = list;
   }
-  if (c0 == c) return TRUE;
-  return FALSE;
+  return c0;
+}
+
+static mrb_bool
+peek_n(parser_state *p, int c, int n)
+{
+  return peekc_n(p, n) == c && c >= 0;
 }
 #define peek(p,c) peek_n((p), (c), 0)
 
@@ -3454,7 +3459,7 @@ peeks(parser_state *p, const char *s)
   }
   else
 #endif
-    if (p->s && p->s + len >= p->send) {
+    if (p->s && p->s + len <= p->send) {
       if (memcmp(p->s, s, len) == 0) return TRUE;
     }
   return FALSE;
@@ -3470,6 +3475,10 @@ skips(parser_state *p, const char *s)
     for (;;) {
       c = nextc(p);
       if (c < 0) return c;
+      if (c == '\n') {
+        p->lineno++;
+        p->column = 0;
+      }
       if (c == *s) break;
     }
     s++;
@@ -3477,7 +3486,10 @@ skips(parser_state *p, const char *s)
       int len = strlen(s);
 
       while (len--) {
-        nextc(p);
+        if (nextc(p) == '\n') {
+          p->lineno++;
+          p->column = 0;
+        }
       }
       return TRUE;
     }
@@ -4189,14 +4201,23 @@ parser_yylex(parser_state *p)
 
   case '=':
     if (p->column == 1) {
-      if (peeks(p, "begin ") || peeks(p, "begin\n")) {
-        if (skips(p, "\n=end ")) {
+      static const char begin[] = "begin";
+      static const char end[] = "\n=end";
+      if (peeks(p, begin)) {
+        c = peekc_n(p, sizeof(begin)-1);
+        if (c < 0 || isspace(c)) {
+          do {
+            if (!skips(p, end)) {
+              yyerror(p, "embedded document meets end of file");
+              return 0;
+            }
+            c = nextc(p);
+          } while (!(c < 0 || isspace(c)));
+          if (c != '\n') skip(p, '\n');
+          p->lineno++;
+          p->column = 0;
           goto retry;
         }
-        if (skips(p, "\n=end\n")) {
-          goto retry;
-        }
-        goto retry;
       }
     }
     if (p->lstate == EXPR_FNAME || p->lstate == EXPR_DOT) {
@@ -5315,20 +5336,20 @@ mrb_parser_parse(parser_state *p, mrbc_context *c)
 
   MRB_TRY(p->jmp) {
 
-  p->cmd_start = TRUE;
-  p->in_def = p->in_single = 0;
-  p->nerr = p->nwarn = 0;
-  p->lex_strterm = NULL;
+    p->cmd_start = TRUE;
+    p->in_def = p->in_single = 0;
+    p->nerr = p->nwarn = 0;
+    p->lex_strterm = NULL;
 
-  parser_init_cxt(p, c);
-  yyparse(p);
-  if (!p->tree) {
-    p->tree = new_nil(p);
-  }
-  parser_update_cxt(p, c);
-  if (c && c->dump_result) {
-    mrb_parser_dump(p->mrb, p->tree, 0);
-  }
+    parser_init_cxt(p, c);
+    yyparse(p);
+    if (!p->tree) {
+      p->tree = new_nil(p);
+    }
+    parser_update_cxt(p, c);
+    if (c && c->dump_result) {
+      mrb_parser_dump(p->mrb, p->tree, 0);
+    }
 
   }
   MRB_CATCH(p->jmp) {
@@ -5445,13 +5466,14 @@ mrb_parser_set_filename(struct mrb_parser_state *p, const char *f)
 
   new_table = (mrb_sym*)parser_palloc(p, sizeof(mrb_sym) * p->filename_table_length);
   if (p->filename_table) {
-    memcpy(new_table, p->filename_table, sizeof(mrb_sym) * p->filename_table_length);
+    memmove(new_table, p->filename_table, sizeof(mrb_sym) * p->filename_table_length);
   }
   p->filename_table = new_table;
   p->filename_table[p->filename_table_length - 1] = sym;
 }
 
-char const* mrb_parser_get_filename(struct mrb_parser_state* p, uint16_t idx) {
+char const*
+mrb_parser_get_filename(struct mrb_parser_state* p, uint16_t idx) {
   if (idx >= p->filename_table_length) { return NULL; }
   else {
     return mrb_sym2name_len(p->mrb, p->filename_table[idx], NULL);
@@ -5500,6 +5522,7 @@ load_exec(mrb_state *mrb, parser_state *p, mrbc_context *c)
   struct RClass *target = mrb->object_class;
   struct RProc *proc;
   mrb_value v;
+  unsigned int keep = 0;
 
   if (!p) {
     return mrb_undef_value();
@@ -5533,12 +5556,13 @@ load_exec(mrb_state *mrb, parser_state *p, mrbc_context *c)
     if (c->target_class) {
       target = c->target_class;
     }
+    keep = c->slen + 1;
   }
   proc->target_class = target;
   if (mrb->c->ci) {
     mrb->c->ci->target_class = target;
   }
-  v = mrb_toplevel_run(mrb, proc);
+  v = mrb_toplevel_run_keep(mrb, proc, keep);
   if (mrb->exc) return mrb_nil_value();
   return v;
 }
@@ -5832,7 +5856,7 @@ mrb_parser_dump(mrb_state *mrb, node *tree, int offset)
     {
       node *n2 = tree->car;
 
-      if (n2  && (n2->car || n2->cdr)) {
+      if (n2 && (n2->car || n2->cdr)) {
         dump_prefix(offset+1);
         printf("local variables:\n");
         dump_prefix(offset+2);
